@@ -200,7 +200,30 @@ def apply_device_settings(
         report_rate_writer = getattr(session, "set_report_rate_hz", None)
         if not callable(report_rate_writer):
             raise RuntimeError("Mouse polling rate cannot be changed")
-        report_rate_hz = int(report_rate_writer(settings.report_rate_hz))
+        available_reader = getattr(session, "get_supported_report_rates_hz", None)
+        available = set(available_reader()) if callable(available_reader) else None
+        if available is not None and settings.report_rate_hz not in available:
+            supported = ", ".join(str(rate) for rate in sorted(available))
+            message = (
+                f"Polling {settings.report_rate_hz} Hz unavailable on this "
+                f"connection; keeping {report_rate_hz} Hz "
+                f"(available: {supported or 'none'} Hz)"
+            )
+            logger = getattr(session, "log", None)
+            if callable(logger):
+                logger(message)
+        else:
+            try:
+                report_rate_hz = int(report_rate_writer(settings.report_rate_hz))
+            except RuntimeError as exc:
+                if "HID++ error 0x02" not in str(exc):
+                    raise
+                logger = getattr(session, "log", None)
+                if callable(logger):
+                    logger(
+                        f"Polling {settings.report_rate_hz} Hz was rejected; "
+                        f"keeping {report_rate_hz} Hz"
+                    )
     return SessionDeviceSettings(
         dpi=int(dpi),
         haptic_left=int(left),

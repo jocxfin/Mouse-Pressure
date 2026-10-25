@@ -7,7 +7,6 @@ import math
 import re
 import threading
 import time
-import winreg
 from collections import deque
 from ctypes import wintypes
 from dataclasses import dataclass, replace
@@ -676,9 +675,8 @@ class _MouseLmbSuppressor:
         self._raw_class_atom = 0
         self._raw_class_name = f"MousePressureRawInput_{id(self):X}"
         self._raw_input_active = False
-        self._raw_direct_mode = bool(
-            allow_raw_direct_motion and self._raw_counts_match_desktop_pixels()
-        )
+        self._raw_direct_mode = bool(allow_raw_direct_motion)
+        self._pointer_speed_factor = self._read_pointer_speed_factor()
         self._raw_device_handle = 0
         self._raw_motion_device_handle = 0
         self._selected_raw_identity = ""
@@ -864,18 +862,21 @@ class _MouseLmbSuppressor:
         self.kernel32.GetModuleHandleW.restype = ctypes.c_void_p
 
     @staticmethod
-    def _raw_counts_match_desktop_pixels() -> bool:
-        """Detect exact one-device-count to one-desktop-pixel Windows motion."""
-        try:
-            with winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                r"Control Panel\Mouse",
-            ) as key:
-                sensitivity = str(winreg.QueryValueEx(key, "MouseSensitivity")[0])
-                acceleration = str(winreg.QueryValueEx(key, "MouseSpeed")[0])
-        except OSError:
-            return False
-        return sensitivity == "10" and acceleration == "0"
+    def _pointer_factor_for_speed(speed: int) -> float:
+        speed = clamp_i(int(speed), 1, 20)
+        if speed <= 2:
+            return speed / 32.0
+        if speed <= 10:
+            return (speed - 2) / 8.0
+        return (speed - 6) / 4.0
+
+    def _read_pointer_speed_factor(self) -> float:
+        speed = ctypes.c_int(10)
+        if self.user32.SystemParametersInfoW(
+            0x0070, 0, ctypes.byref(speed), 0
+        ):
+            return self._pointer_factor_for_speed(speed.value)
+        return 1.0
 
     def start(self) -> None:
         if self._thread is not None:
@@ -1377,19 +1378,25 @@ class _MouseLmbSuppressor:
         ]
         if not deltas:
             return []
-        total_dx = sum(dx for _at, dx, _dy in deltas)
-        total_dy = sum(dy for _at, _dx, dy in deltas)
-        if abs(total_dx) + abs(total_dy) < 2:
-            return []
-        x = int(anchor_x) - total_dx
-        y = int(anchor_y) - total_dy
-        path = [(float(started_at), x, y)]
+        gain = self._pointer_speed_factor
+        total_x = 0
+        total_y = 0
+        cumulative: list[tuple[float, int, int]] = [
+            (float(started_at), 0, 0)
+        ]
         for at, dx, dy in deltas:
-            x += dx
-            y += dy
-            if path[-1][1:] != (x, y):
-                path.append((float(at), x, y))
-        return path if len(path) >= 2 else []
+            total_x += dx
+            total_y += dy
+            point = (float(at), round(total_x * gain), round(total_y * gain))
+            if point[1:] != cumulative[-1][1:]:
+                cumulative.append(point)
+        if len(cumulative) < 2:
+            return []
+        offset_x = int(anchor_x) - cumulative[-1][1]
+        offset_y = int(anchor_y) - cumulative[-1][2]
+        return [
+            (at, x + offset_x, y + offset_y) for at, x, y in cumulative
+        ]
 
     def _contact_button_down(self) -> bool:
         return bool(
@@ -1629,8 +1636,12 @@ class _MouseLmbSuppressor:
         self._motion_carry_x = 0.0
         self._motion_carry_y = 0.0
 
-    def _scale_contact_delta(self, dx: int, dy: int) -> tuple[int, int]:
+    def _scale_contact_delta(
+        self, dx: int, dy: int, *, device_counts: bool = False
+    ) -> tuple[int, int]:
         multiplier = self._pressure_motion_multiplier()
+        if device_counts:
+            multiplier *= self._pointer_speed_factor
         scaled_x = int(dx) * multiplier + self._motion_carry_x
         scaled_y = int(dy) * multiplier + self._motion_carry_y
         output_x = math.trunc(scaled_x)
@@ -2139,6 +2150,7 @@ class _MouseLmbSuppressor:
             self._pending_hook_positions.clear()
             self._selected_raw_identity = incoming_identity
             self._raw_contact_active = True
+            self._pointer_speed_factor = self._read_pointer_speed_factor()
             self._reset_motion_carry()
             anchor = self._button_anchor
             anchor_ready = bool(
@@ -2244,7 +2256,7 @@ class _MouseLmbSuppressor:
                         self._pressure_sensitivity_channel() is not None
                     )
                     scaled_dx, scaled_dy = (
-                        self._scale_contact_delta(dx, dy)
+                        self._scale_contact_delta(dx, dy, device_counts=True)
                         if sensitivity_active
                         else (dx, dy)
                     )
@@ -2307,7 +2319,7 @@ class _MouseLmbSuppressor:
                 raw_distance=math.hypot(dx, dy),
             )
             if self._raw_direct_mode:
-                scaled_dx, scaled_dy = self._scale_contact_delta(dx, dy)
+                scaled_dx, scaled_dy = self._scale_contact_delta(dx, dy, device_counts=True)
                 with self._position_lock:
                     self._raw_x += scaled_dx
                     self._raw_y += scaled_dy
@@ -2566,7 +2578,7 @@ class _MouseLmbSuppressor:
         )
 
         native_capture = self._native_input_capture
-        if native_capture is not None:
+        if native_capture is not None and not self._raw_direct_mode:
             try:
                 native_capture.open()
                 self._native_input_capture_active = True
@@ -2772,7 +2784,7 @@ class _MouseLmbSuppressor:
             raw_error = ctypes.get_last_error()
         if self._raw_input_active:
             coordinate_mode = (
-                "device deltas (1:1, acceleration off)"
+                "device-scoped motion"
                 if self._raw_direct_mode
                 else "Windows-transformed hook correlation"
             )

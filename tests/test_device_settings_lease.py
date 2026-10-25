@@ -272,3 +272,33 @@ def test_first_live_change_arms_recovery_after_noop_activation(
             "report_rate_hz": 1000,
         }
     ]
+
+def test_unsupported_session_polling_rate_preserves_current_setting() -> None:
+    from mouse_pressure.runtime.device_settings import apply_device_settings
+
+    session = _Session()
+    session.get_supported_report_rates_hz = lambda: (1000,)
+    session.log = session.events.append
+    requested = SessionDeviceSettings(
+        dpi=1200,
+        haptic_left=4,
+        haptic_right=2,
+        actuation_left=7,
+        actuation_right=4,
+        report_rate_hz=2000,
+    )
+    current = DeviceSettingsSnapshot(
+        session=SessionDeviceSettings(
+            dpi=1200,
+            haptic_left=4,
+            haptic_right=2,
+            actuation_left=7,
+            actuation_right=4,
+            report_rate_hz=1000,
+        ),
+        report_rate_hz=1000,
+    )
+    applied = apply_device_settings(session, requested, current_settings=current)
+    assert applied.report_rate_hz == 1000
+    assert session.report_rate_hz == 1000
+    assert "unavailable" in session.events[-1]

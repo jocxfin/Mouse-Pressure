@@ -721,12 +721,35 @@ class PressureHidppSession:
             raise RuntimeError("Extended report-rate response was invalid")
         return REPORT_RATE_ENUM_TO_HZ[values[0]]
 
+    def get_supported_report_rates_hz(self) -> tuple[int, ...]:
+        """Read the rates available on the current connection."""
+        values = self.request_long(
+            feature_index=self._report_rate_feature_index(),
+            address=_function_to_address(1, DEVICE_CONFIG_SW_ID),
+            payload=[],
+            label="RATE.available.read",
+        )
+        if len(values) < 2:
+            raise RuntimeError("Report-rate capability response was incomplete")
+        mask = values[1]
+        return tuple(
+            hz for index, hz in REPORT_RATE_ENUM_TO_HZ.items()
+            if mask & (1 << index)
+        )
+
     def set_report_rate_hz(self, report_rate_hz: int) -> int:
         """Set and verify one rate supported by HID++ feature 0x8061."""
         rate_enum = REPORT_RATE_HZ_TO_ENUM.get(int(report_rate_hz))
         if rate_enum is None:
             supported = ", ".join(str(rate) for rate in REPORT_RATE_HZ_TO_ENUM)
             raise ValueError(f"Report rate must be one of: {supported} Hz")
+        available = self.get_supported_report_rates_hz()
+        if report_rate_hz not in available:
+            rates = ", ".join(str(rate) for rate in available) or "none"
+            raise ValueError(
+                f"{report_rate_hz} Hz is unavailable on this connection "
+                f"(available: {rates} Hz)"
+            )
         feature_index = self._report_rate_feature_index()
         self.request_long(
             feature_index=feature_index,

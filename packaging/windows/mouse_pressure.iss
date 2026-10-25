@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.4.0-dev"
+  #define MyAppVersion "0.4.1-dev"
 #endif
 
 #define MyAppName "Mouse Pressure"
@@ -12,9 +12,9 @@ AppId={{B63841C7-3B13-47CC-A80A-85D44708AF35}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-AppPublisherURL=https://github.com/benmklein/analog_mouse_pressure
-AppSupportURL=https://github.com/benmklein/analog_mouse_pressure/issues
-AppUpdatesURL=https://github.com/benmklein/analog_mouse_pressure/releases
+AppPublisherURL=https://github.com/jocxfin/Mouse-Pressure
+AppSupportURL=https://github.com/jocxfin/Mouse-Pressure/issues
+AppUpdatesURL=https://github.com/jocxfin/Mouse-Pressure/releases
 DefaultDirName={autopf}\Mouse Pressure
 DefaultGroupName=Mouse Pressure
 DisableProgramGroupPage=yes

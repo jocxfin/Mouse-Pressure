@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from mouse_pressure.sniff.hidpp_pressure import (
     WIRED_DEVICE_INDEX,
     Feature0CFrame,
@@ -208,6 +210,8 @@ def test_extended_report_rate_uses_discovered_feature_and_wire_values() -> None:
         calls.append((feature_index, address, list(payload), label))
         if feature_index == 0x00:
             return [0x0D]
+        if address == 0x1F:
+            return [0, 0x7F]
         if address == 0x3F:
             current_rate[0] = payload[0]
             return []
@@ -223,6 +227,29 @@ def test_extended_report_rate_uses_discovered_feature_and_wire_values() -> None:
     assert calls == [
         (0x00, 0x08, [0x80, 0x61], "RATE.discover.0x8061"),
         (0x0D, 0x2F, [0x01], "RATE.read"),
+        (0x0D, 0x1F, [], "RATE.available.read"),
         (0x0D, 0x3F, [0x03], "RATE.write=1000"),
         (0x0D, 0x2F, [0x01], "RATE.read"),
     ]
+
+
+def test_extended_report_rate_checks_current_connection_capabilities() -> None:
+    session = PressureHidppSession(log=lambda _line: None)
+    requests: list[int] = []
+
+    def request_long(*, feature_index, address, payload, label, timeout_s=0.12):
+        del feature_index, payload, label, timeout_s
+        requests.append(address)
+        if address == 0x08:
+            return [0x0D]
+        if address == 0x1F:
+            return [0, 1 << 3]
+        if address == 0x2F:
+            return [3]
+        raise AssertionError(f"Unexpected write at {address:x}")
+
+    session.request_long = request_long
+    assert session.get_supported_report_rates_hz() == (1000,)
+    with pytest.raises(ValueError, match="unavailable on this connection"):
+        session.set_report_rate_hz(2000)
+    assert 0x3F not in requests

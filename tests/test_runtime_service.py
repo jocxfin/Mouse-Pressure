@@ -357,11 +357,11 @@ class RuntimeServiceTests(unittest.IsolatedAsyncioTestCase):
         await service.stop_stream()
         self.assertEqual(session.close_calls, 3)
 
-    def test_native_output_preserves_windows_transformed_motion(self) -> None:
+    def test_native_output_uses_device_scoped_motion(self) -> None:
         service, _, _ = self._service(_FakeSession([]))
 
         native_config = service._emitter_config_from_runtime()  # noqa: SLF001
-        self.assertFalse(native_config.allow_raw_direct_motion)
+        self.assertTrue(native_config.allow_raw_direct_motion)
         self.assertEqual(native_config.output_backend, "native_synthetic")
         self.assertEqual(native_config.remap_mode, "always")
         self.assertEqual(native_config.remap_hold_hotkey, "Mouse 5")
@@ -864,6 +864,12 @@ class RuntimeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("native clicks were restored", failures[0])
         self.assertEqual(len(holder["emitter"].fail_open_calls), 1)
+        close_deadline = asyncio.get_running_loop().time() + 1.5
+        while (
+            holder["emitter"].close_calls == 0
+            and asyncio.get_running_loop().time() < close_deadline
+        ):
+            await asyncio.sleep(0.01)
         self.assertEqual(holder["emitter"].close_calls, 1)
         self.assertEqual(session.close_calls, 1)
 

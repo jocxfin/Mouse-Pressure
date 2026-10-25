@@ -642,10 +642,7 @@ class RuntimeService:
             pressure_influence=self._config.left.pressure_influence,
             onset_buffer=self._config.left.onset_buffer,
             true_low_latency=self._config.left.true_low_latency,
-            # Preserve Windows' transformed desktop motion. The device is
-            # temporarily limited to 1000 Hz while mapping is active because
-            # its 8 kHz reports overwhelm this hook-correlated path.
-            allow_raw_direct_motion=False,
+            allow_raw_direct_motion=True,
             stationary_pressure_updates=(self._config.left.stationary_pressure_updates),
             immediate_button_wake=True,
             right_contact_threshold=10,

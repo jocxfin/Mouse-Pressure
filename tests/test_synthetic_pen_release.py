@@ -2298,6 +2298,73 @@ class SyntheticPenReleaseTests(unittest.TestCase):
             "VID_046D&PID_C54D",
         )
 
+    def test_pointer_speed_matches_windows_linear_steps(self) -> None:
+        factor = _MouseLmbSuppressor._pointer_factor_for_speed
+        self.assertEqual(factor(1), 1 / 32)
+        self.assertEqual(factor(5), 3 / 8)
+        self.assertEqual(factor(10), 1)
+        self.assertEqual(factor(14), 2)
+        self.assertEqual(factor(20), 3.5)
+
+    def test_raw_motion_ignores_unflagged_pen_feedback(self) -> None:
+        suppressor = _MouseLmbSuppressor(log=lambda _line: None)
+        self.assertTrue(suppressor._raw_direct_mode)
+        suppressor._pointer_speed_factor = 1
+        suppressor._raw_input_active = True
+        suppressor._lmb_down = True
+        suppressor._raw_contact_active = True
+        suppressor._raw_device_handle = 0xA1
+        suppressor._raw_motion_device_handle = 0xA1
+        suppressor._raw_x = 1700
+        suppressor._raw_y = 700
+        suppressor._logical_position_initialized = True
+
+        expected_x, expected_y = 1700, 700
+        for index in range(140):
+            for feedback in range(6):
+                x = 1000 + (index * 7 + feedback * 19) % 900
+                y = 250 + (index * 17 + feedback * 13) % 800
+                suppressor.mark_injected_position(x, y)
+                suppressor._handle_native_mouse_move(
+                    time.perf_counter(), x, y, injected=False
+                )
+            dx = ((index * 17) % 29) - 14
+            dy = ((index * 11) % 19) - 9
+            raw = RAWMOUSE()
+            raw.lLastX = dx
+            raw.lLastY = dy
+            suppressor._handle_raw_mouse(0xA1, raw)
+            expected_x += dx
+            expected_y += dy
+            positions = suppressor.drain_hardware_positions()
+            if dx or dy:
+                self.assertEqual(positions[-1][1:], (expected_x, expected_y))
+            else:
+                self.assertFalse(positions)
+
+        self.assertEqual(suppressor.motion_diagnostics()["wrong_device"], 0)
+        self.assertEqual((suppressor._raw_x, suppressor._raw_y), (expected_x, expected_y))
+
+    def test_raw_motion_keeps_fractional_pointer_speed(self) -> None:
+        suppressor = _MouseLmbSuppressor(log=lambda _line: None)
+        suppressor._pointer_speed_factor = 1.25
+        suppressor._raw_direct_mode = True
+        suppressor._raw_input_active = True
+        suppressor._raw_contact_active = True
+        suppressor._lmb_down = True
+        suppressor._raw_device_handle = 0xA1
+        suppressor._raw_motion_device_handle = 0xA1
+        suppressor._raw_x = 500
+        suppressor._raw_y = 400
+        suppressor._logical_position_initialized = True
+
+        for _ in range(8):
+            raw = RAWMOUSE()
+            raw.lLastX = 1
+            suppressor._handle_raw_mouse(0xA1, raw)
+
+        self.assertEqual(suppressor.drain_hardware_positions()[-1][1:], (510, 400))
+
     def test_one_to_one_raw_mode_uses_only_selected_device_deltas(self) -> None:
         suppressor = _MouseLmbSuppressor(log=lambda _line: None)
         suppressor._raw_input_active = True  # noqa: SLF001
