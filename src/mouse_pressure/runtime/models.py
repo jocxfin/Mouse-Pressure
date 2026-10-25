@@ -19,7 +19,7 @@ class StreamNotActiveError(RuntimeError):
     pass
 
 
-_PROTOCOL_CURVES = {"linear", "soft", "hard", "scurve"}
+_PROTOCOL_CURVES = {"linear", "soft", "hard", "scurve", "custom"}
 _OUTPUT_TARGETS = {"pressure", "mouse_sensitivity", "x_tilt", "y_tilt", "rotation"}
 CURVE_STRENGTH_MIN = 0.5
 CURVE_STRENGTH_MAX = 4.0
@@ -48,6 +48,8 @@ def validate_channel_config(ch: dict) -> list[str]:
     deadzone_high = ch.get("deadzone_high")
     curve = ch.get("curve")
     curve_strength = ch.get("curve_strength")
+    custom_points = ch.get("custom_curve_points", (0, 25, 50, 75, 100))
+    full_output_at = ch.get("full_output_at_pct", 95)
     actuation_level = ch.get("actuation_level")
     pressure_floor = ch.get("pressure_floor")
     path_stabilization = ch.get("path_stabilization")
@@ -110,7 +112,7 @@ def validate_channel_config(ch: dict) -> list[str]:
     if not isinstance(curve, str):
         errors.append("curve must be a string")
     elif curve not in _PROTOCOL_CURVES:
-        errors.append("curve must be one of: linear, soft, hard, scurve")
+        errors.append("curve must be one of: linear, soft, hard, scurve, custom")
 
     if not isinstance(curve_strength, (int, float)):
         errors.append("curve_strength must be numeric")
@@ -121,6 +123,17 @@ def validate_channel_config(ch: dict) -> list[str]:
                 f"curve_strength must be in "
                 f"{CURVE_STRENGTH_MIN:g}..{CURVE_STRENGTH_MAX:g}"
             )
+
+    if (
+        not isinstance(custom_points, (tuple, list))
+        or len(custom_points) != 5
+        or any(type(value) is not int or not 0 <= value <= 100 for value in custom_points)
+        or (custom_points[0], custom_points[-1]) != (0, 100)
+        or tuple(custom_points) != tuple(sorted(custom_points))
+    ):
+        errors.append("custom_curve_points must be five ascending percentages from 0 to 100")
+    if type(full_output_at) is not int or not 70 <= full_output_at <= 100:
+        errors.append("full_output_at_pct must be in 70..100")
 
     if not isinstance(actuation_level, int):
         errors.append("actuation_level must be an integer")

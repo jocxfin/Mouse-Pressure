@@ -20,7 +20,7 @@ from mouse_pressure.runtime.models import (
 )
 from mouse_pressure.ui.hotkeys import parse_global_hotkey, parse_hold_hotkey
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def resolve_config_dir(config_dir: str | Path | None = None) -> Path:
@@ -62,6 +62,8 @@ def _channel_from_dict(raw: Any, defaults: ChannelConfig) -> ChannelConfig:
         deadzone_high=int(raw.get("deadzone_high", defaults.deadzone_high)),
         curve=str(raw.get("curve", defaults.curve)),
         curve_strength=float(raw.get("curve_strength", defaults.curve_strength)),
+        custom_curve_points=tuple(raw.get("custom_curve_points", defaults.custom_curve_points)),
+        full_output_at_pct=int(raw.get("full_output_at_pct", defaults.full_output_at_pct)),
         actuation_level=int(raw.get("actuation_level", defaults.actuation_level)),
         pressure_floor=int(raw.get("pressure_floor", defaults.pressure_floor)),
         path_stabilization=int(
@@ -88,9 +90,9 @@ def runtime_config_from_dict(raw: Any) -> RuntimeConfig:
         raise ValidationError("config must be an object")
 
     schema_version = raw.get("schema_version", SCHEMA_VERSION)
-    if schema_version != SCHEMA_VERSION:
+    if schema_version not in (1, SCHEMA_VERSION):
         raise SchemaMismatchError(
-            f"Unsupported schema_version: {schema_version!r}; expected {SCHEMA_VERSION}"
+            f"Unsupported schema_version: {schema_version!r}; expected 1 or {SCHEMA_VERSION}"
         )
 
     linked = raw.get("linked", RuntimeConfig.linked)

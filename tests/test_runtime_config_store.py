@@ -85,7 +85,7 @@ class ConfigStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             store = ConfigStore(td)
             loaded = store.load()
-            self.assertEqual(loaded.schema_version, 1)
+            self.assertEqual(loaded.schema_version, 2)
             self.assertFalse(loaded.linked)
             self.assertTrue(loaded.left_enabled)
             self.assertTrue(loaded.right_enabled)
@@ -161,7 +161,7 @@ class ConfigStoreTests(unittest.TestCase):
             store.path.parent.mkdir(parents=True, exist_ok=True)
             store.path.write_text(
                 json.dumps(
-                    {"schema_version": 2, "linked": True, "left": {}, "right": {}}
+                    {"schema_version": 3, "linked": True, "left": {}, "right": {}}
                 ),
                 encoding="utf-8",
             )

@@ -27,6 +27,8 @@ class ChannelConfig:
     deadzone_high: int = 0
     curve: str = "linear"
     curve_strength: float = 1.0
+    custom_curve_points: tuple[int, int, int, int, int] = (0, 25, 50, 75, 100)
+    full_output_at_pct: int = 95
     # Hardware actuation depth. 1 is shallowest; 10 requires the deepest press.
     actuation_level: int = 5
     # Prevent very low pressure samples from stretching into a long hairline.
@@ -50,7 +52,7 @@ class ChannelConfig:
 
 @dataclass
 class RuntimeConfig:
-    schema_version: int = 1
+    schema_version: int = 2
     linked: bool = False
     left_enabled: bool = True
     right_enabled: bool = True

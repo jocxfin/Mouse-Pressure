@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.4.1-dev"
+  #define MyAppVersion "5.0.0-dev"
 #endif
 
 #define MyAppName "Mouse Pressure"

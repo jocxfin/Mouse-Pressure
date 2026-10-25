@@ -80,6 +80,7 @@ def test_channel_editor_uses_outcome_labels_and_exposes_raw_values() -> None:
         "Linear",
         "Logarithmic",
         "Exponential",
+        "Custom (5-point)",
     ]
     assert "Actuation point" not in labels
     assert "Min Mouse Pressure" in labels

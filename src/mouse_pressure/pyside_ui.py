@@ -21,9 +21,11 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QKeySequenceEdit,
     QLabel,
     QLineEdit,
@@ -51,12 +53,15 @@ from mouse_pressure.dev_ui import (
 )
 from mouse_pressure.runtime.config_store import ConfigStore
 from mouse_pressure.runtime.device_settings import SessionDeviceSettings
+from mouse_pressure.runtime.foreground import foreground_executable, mouse_buttons_down
 from mouse_pressure.runtime.log_bus import LogBus, LogEntry
+from mouse_pressure.runtime.profiles import ProfileLibrary
 from mouse_pressure.runtime.runtime_service import RuntimeService
 from mouse_pressure.ui.hotkeys import parse_global_hotkey, parse_hold_hotkey
 from mouse_pressure.ui.qt_theme import Theme, stylesheet, theme_for
 from mouse_pressure.ui.qt_widgets import (
     Card,
+    CustomCurveEditor,
     LabeledSwitch,
     MappingGraph,
     SliderField,
@@ -64,6 +69,7 @@ from mouse_pressure.ui.qt_widgets import (
     metric_card,
 )
 from mouse_pressure.ui.settings_model import SettingsDraft, actuation_raw_estimate
+from mouse_pressure.ui.stroke_export import stroke_to_csv, stroke_to_svg
 from mouse_pressure.ui.windows_shell import (
     SingleInstanceGuard,
     StartHotkeyListener,
@@ -506,6 +512,7 @@ class ChannelEditor(QWidget):
         self.curve.addItem("Linear", "linear")
         self.curve.addItem("Logarithmic", "hard")
         self.curve.addItem("Exponential", "soft")
+        self.curve.addItem("Custom (5-point)", "custom")
         index = self.curve.findData(config.curve)
         self.curve.setCurrentIndex(max(0, index))
         settings.addWidget(self.curve)
@@ -524,6 +531,59 @@ class ChannelEditor(QWidget):
             lambda value: self.curve_strength.value_label.setText(f"{value / 10:.1f}")
         )
         settings.addWidget(self.curve_strength)
+
+        self.custom_curve_controls = QWidget()
+        curve_layout = QVBoxLayout(self.custom_curve_controls)
+        curve_layout.setContentsMargins(0, 0, 0, 0)
+        curve_layout.addWidget(_label("Shape the pressure response", muted=True))
+        self.custom_curve_editor = CustomCurveEditor()
+        self.custom_curve_editor.set_points(config.custom_curve_points)
+        curve_layout.addWidget(self.custom_curve_editor)
+        points_row = QHBoxLayout()
+        self.custom_curve_fields: dict[int, QSpinBox] = {}
+        for index in (1, 2, 3):
+            column = QVBoxLayout()
+            column.addWidget(_label(f"{index * 25}% input", muted=True))
+            field = QSpinBox()
+            field.setRange(0, 100)
+            field.setSuffix("%")
+            field.setValue(config.custom_curve_points[index])
+            self.custom_curve_fields[index] = field
+            field.valueChanged.connect(
+                lambda value, i=index: self.custom_curve_editor.set_point(i, value)
+            )
+            column.addWidget(field)
+            points_row.addLayout(column, 1)
+        curve_layout.addLayout(points_row)
+        self.custom_curve_editor.pointsChanged.connect(self._sync_curve_fields)
+        self.curve_preset = QComboBox()
+        for title, points in (
+            ("Linear", (0, 25, 50, 75, 100)),
+            ("Fine control", (0, 8, 28, 60, 100)),
+            ("Soft brush", (0, 40, 68, 87, 100)),
+            ("Ink pressure", (0, 12, 36, 72, 100)),
+            ("Quick build", (0, 57, 82, 95, 100)),
+        ):
+            self.curve_preset.addItem(title, points)
+        presets = QHBoxLayout()
+        presets.addWidget(self.curve_preset, 1)
+        preset_button = QPushButton("Load shape")
+        preset_button.clicked.connect(
+            lambda: self._set_custom_curve(self.curve_preset.currentData())
+        )
+        presets.addWidget(preset_button)
+        curve_layout.addLayout(presets)
+        settings.addWidget(self.custom_curve_controls)
+
+        self.full_output_at = SliderField(
+            "Reach full pressure at",
+            70,
+            100,
+            config.full_output_at_pct,
+            suffix="%",
+            description="Maximum brush pressure without needing to bottom out the button.",
+        )
+        settings.addWidget(self.full_output_at)
         self.curve.currentIndexChanged.connect(self._update_curve_controls)
         self._update_curve_controls()
 
@@ -582,9 +642,23 @@ class ChannelEditor(QWidget):
         root.addWidget(self.settings_content)
         self.advanced_button.toggled.connect(self._show_advanced)
 
+    def _sync_curve_fields(self, points: tuple[int, ...]) -> None:
+        for index, field in self.custom_curve_fields.items():
+            field.blockSignals(True)
+            field.setValue(points[index])
+            field.blockSignals(False)
+
+    def _set_custom_curve(self, points: tuple[int, ...]) -> None:
+        self.custom_curve_editor.set_points(points)
+        self._sync_curve_fields(points)
+        self.custom_curve_editor.pointsChanged.emit(points)
+
     def _update_curve_controls(self, *_args: Any) -> None:
-        self.curve_strength.setVisible(self.curve.currentData() != "linear")
+        curve = self.curve.currentData()
+        self.curve_strength.setVisible(curve not in {"linear", "custom"})
+        self.custom_curve_controls.setVisible(curve == "custom")
         self.curve_strength.updateGeometry()
+        self.custom_curve_controls.updateGeometry()
         self.updateGeometry()
 
     def _show_advanced(self, visible: bool) -> None:
@@ -621,6 +695,9 @@ class ChannelEditor(QWidget):
             self.raw_max,
             self.curve,
             self.curve_strength,
+            self.full_output_at,
+            self.custom_curve_editor,
+            *self.custom_curve_fields.values(),
             self.suppress,
             self.deadzone,
             self.pressure_floor,
@@ -663,6 +740,13 @@ class MainWindow(QMainWindow):
         self._normal_device: SessionDeviceSettings | None = None
         self._trace_paths: dict[str, Path] = {}
         self._hotkey_capture_active = False
+        self.profile_library = ProfileLibrary(config_store.config_dir)
+        self.profile_library.load(service.get_config())
+        self._manual_profile_id = self.profile_library.selected_id
+        self._active_profile_id = self._manual_profile_id
+        self._profile_candidate = ""
+        self._profile_candidate_count = 0
+        service.apply_config(self.profile_library.get(self._manual_profile_id).mapping)
         self._qt_settings = QSettings("Mouse Pressure", "Mouse Pressure")
         self.theme_name = str(self._qt_settings.value("theme", "dark"))
         self.theme: Theme = theme_for(self.theme_name)
@@ -703,6 +787,9 @@ class MainWindow(QMainWindow):
         self.event_timer = QTimer(self)
         self.event_timer.timeout.connect(self._drain_events)
         self.event_timer.start(33)
+        self.profile_timer = QTimer(self)
+        self.profile_timer.timeout.connect(self._check_auto_profile)
+        self.profile_timer.start(650)
         self.write_system("Ready. Settings are stored in ~/.mouse-pressure/config.json")
         self._redraw_mapping()
         self._begin_device_detection()
@@ -736,7 +823,7 @@ class MainWindow(QMainWindow):
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
         self.nav_buttons: list[QPushButton] = []
-        for index, title in enumerate(("Pressure", "Mouse", "Stroke analysis", "Logs")):
+        for index, title in enumerate(("Pressure", "Mouse", "Stroke analysis", "Logs", "Profiles")):
             button = QPushButton(title)
             button.setObjectName("nav")
             button.setCheckable(True)
@@ -812,11 +899,13 @@ class MainWindow(QMainWindow):
         self.mouse_page = self._build_mouse_page(config)
         self.analysis_page = self._build_analysis_page()
         self.logs_page = self._build_logs_page()
+        self.profiles_page = self._build_profiles_page()
         for page in (
             self.pressure_page,
             self.mouse_page,
             self.analysis_page,
             self.logs_page,
+            self.profiles_page,
         ):
             self.pages.addWidget(page)
         self._set_debug_navigation(config.debug_mode)
@@ -1220,6 +1309,12 @@ class MainWindow(QMainWindow):
         refresh = QPushButton("Refresh")
         refresh.clicked.connect(lambda: self._refresh_strokes(select_latest=False))
         toolbar.addWidget(refresh)
+        csv_button = QPushButton("Export CSV")
+        csv_button.clicked.connect(lambda: self._export_selected_stroke("csv"))
+        toolbar.addWidget(csv_button)
+        svg_button = QPushButton("Export SVG")
+        svg_button.clicked.connect(lambda: self._export_selected_stroke("svg"))
+        toolbar.addWidget(svg_button)
         card.content.addLayout(toolbar)
         self.stroke_summary = _label(
             "Draw with Debug mode enabled, then select a stroke.", muted=True, wrap=True
@@ -1247,6 +1342,257 @@ class MainWindow(QMainWindow):
         card.content.addLayout(metrics)
         layout.addWidget(card, 1)
         return content
+
+    def _build_profiles_page(self) -> QScrollArea:
+        content, layout = _page_container()
+        content.setMaximumWidth(800)
+        layout.setSpacing(18)
+
+        card = Card()
+        card.content.addWidget(_label("Workspace profiles", muted=True))
+        card.content.addWidget(_label(
+            "Keep a different pressure feel for each drawing application. "
+            "Profiles store button mappings and curves, without changing "
+            "your mouse DPI, hardware actuation, or shortcuts.",
+            muted=True,
+            wrap=True,
+        ))
+
+        selector = QHBoxLayout()
+        selector.addWidget(_label("Active profile"))
+        self.profile_combo = QComboBox()
+        selector.addWidget(self.profile_combo, 1)
+        card.content.addLayout(selector)
+
+        first_row = QHBoxLayout()
+        for caption, callback in (
+            ("New from current", self._profile_new),
+            ("Rename", self._profile_rename),
+            ("Delete", self._profile_delete),
+        ):
+            button = QPushButton(caption)
+            button.clicked.connect(callback)
+            first_row.addWidget(button)
+        card.content.addLayout(first_row)
+
+        second_row = QHBoxLayout()
+        for caption, callback in (
+            ("Save current mapping", self._profile_save),
+            ("Import profile", self._profile_import),
+            ("Export profile", self._profile_export),
+        ):
+            button = QPushButton(caption)
+            button.clicked.connect(callback)
+            second_row.addWidget(button)
+        card.content.addLayout(second_row)
+        layout.addWidget(card)
+
+        automation = Card()
+        automation.content.addWidget(_label("Application switching", muted=True))
+        self.profile_auto = QCheckBox(
+            "Switch profiles when their assigned application comes into focus"
+        )
+        self.profile_auto.setChecked(self.profile_library.auto_switch)
+        self.profile_auto.toggled.connect(self._profile_set_auto)
+        automation.content.addWidget(self.profile_auto)
+        automation.content.addWidget(_label(
+            "Assigned executable names (comma-separated)", muted=True
+        ))
+        apps_row = QHBoxLayout()
+        self.profile_apps = QLineEdit()
+        self.profile_apps.setPlaceholderText("Photoshop.exe, Krita.exe")
+        apps_row.addWidget(self.profile_apps, 1)
+        assign_button = QPushButton("Save applications")
+        assign_button.clicked.connect(self._profile_assign)
+        apps_row.addWidget(assign_button)
+        automation.content.addLayout(apps_row)
+        automation.content.addWidget(_label(
+            "Automatic changes wait until both mouse buttons are released. "
+            "Manual selection remains the fallback for unassigned applications.",
+            muted=True,
+            wrap=True,
+        ))
+        self.profile_status = _label("Profile ready", muted=True, wrap=True)
+        automation.content.addWidget(self.profile_status)
+        layout.addWidget(automation)
+        layout.addStretch(1)
+
+        self._refresh_profile_picker()
+        self.profile_combo.currentIndexChanged.connect(self._profile_choose)
+        return self._scroll_page(content)
+
+    def _refresh_profile_picker(self) -> None:
+        self.profile_combo.blockSignals(True)
+        try:
+            self.profile_combo.clear()
+            for entry in self.profile_library.profiles:
+                self.profile_combo.addItem(entry.name, entry.id)
+            self.profile_combo.setCurrentIndex(
+                self.profile_combo.findData(self._active_profile_id)
+            )
+        finally:
+            self.profile_combo.blockSignals(False)
+        self._refresh_profile_details()
+
+    def _refresh_profile_details(self) -> None:
+        profile = self.profile_library.get(self._active_profile_id)
+        self.profile_apps.setText(", ".join(profile.applications))
+        base = self.profile_library.get(self._manual_profile_id).name
+        active = profile.name
+        mode = (
+            f"Automatically selected: {active} · Manual fallback: {base}"
+            if self._active_profile_id != self._manual_profile_id
+            else f"Using: {active}"
+        )
+        self.profile_status.setText(mode)
+
+    def _activate_profile(self, profile_id: str, *, manual: bool) -> bool:
+        if self.settings_dirty or self.calibrating or self.busy or mouse_buttons_down():
+            return False
+        try:
+            config = self.service.apply_config(
+                self.profile_library.get(profile_id).mapping
+            )
+        except Exception as exc:
+            self.write_system(f"Could not switch profile: {exc}", level="ERROR")
+            return False
+        self._active_profile_id = profile_id
+        if manual:
+            self.profile_library.select(profile_id)
+            self._manual_profile_id = profile_id
+        self._load_config(config)
+        self.settings_dirty = False
+        self.save_button.setEnabled(False)
+        self._refresh_profile_picker()
+        self._redraw_mapping()
+        self.write_system(f"Profile: {self.profile_library.get(profile_id).name}")
+        return True
+
+    def _profile_choose(self, _index: int) -> None:
+        profile_id = self.profile_combo.currentData()
+        if profile_id and not self._activate_profile(profile_id, manual=True):
+            self._refresh_profile_picker()
+            self.profile_status.setText(
+                "Apply or discard pending changes and release both mouse buttons."
+            )
+
+    def _profile_new(self) -> None:
+        name, accepted = QInputDialog.getText(self, "New profile", "Profile name:")
+        if not accepted:
+            return
+        try:
+            if self.settings_dirty and not self._apply_settings():
+                return
+            created = self.profile_library.create(name, self.service.get_config())
+            self._activate_profile(created.id, manual=True)
+        except Exception as exc:
+            QMessageBox.warning(self, "New profile", str(exc))
+
+    def _profile_save(self) -> None:
+        if self.settings_dirty and not self._apply_settings():
+            return
+        try:
+            self.profile_library.update(
+                self._active_profile_id, self.service.get_config()
+            )
+            self.write_system("Profile mapping saved.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Save profile", str(exc))
+
+    def _profile_rename(self) -> None:
+        profile = self.profile_library.get(self._active_profile_id)
+        name, accepted = QInputDialog.getText(
+            self, "Rename profile", "Profile name:", text=profile.name
+        )
+        if not accepted:
+            return
+        try:
+            self.profile_library.rename(profile.id, name)
+            self._refresh_profile_picker()
+        except Exception as exc:
+            QMessageBox.warning(self, "Rename profile", str(exc))
+
+    def _profile_delete(self) -> None:
+        profile = self.profile_library.get(self._active_profile_id)
+        if QMessageBox.question(
+            self,
+            "Delete profile",
+            f"Delete {profile.name}? This cannot be undone.",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.profile_library.remove(profile.id)
+            self._manual_profile_id = self.profile_library.selected_id
+            self._activate_profile(self._manual_profile_id, manual=True)
+        except Exception as exc:
+            QMessageBox.warning(self, "Delete profile", str(exc))
+
+    def _profile_assign(self) -> None:
+        try:
+            self.profile_library.assign(
+                self._active_profile_id, self.profile_apps.text()
+            )
+            self._refresh_profile_details()
+            self.write_system("Application assignments saved.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Assign applications", str(exc))
+
+    def _profile_set_auto(self, enabled: bool) -> None:
+        self.profile_library.auto_switch = enabled
+        self.profile_library.save()
+        self._profile_candidate = ""
+        self._profile_candidate_count = 0
+
+    def _profile_export(self) -> None:
+        path, _selected = QFileDialog.getSaveFileName(
+            self, "Export profile",
+            str(self.profile_library.path.parent / "mouse-pressure-profile.json"),
+            "Mouse Pressure profile (*.json)",
+        )
+        if path:
+            try:
+                self.profile_library.export_profile(self._active_profile_id, path)
+            except Exception as exc:
+                QMessageBox.warning(self, "Export profile", str(exc))
+
+    def _profile_import(self) -> None:
+        path, _selected = QFileDialog.getOpenFileName(
+            self, "Import profile",
+            str(self.profile_library.path.parent),
+            "Mouse Pressure profile (*.json)",
+        )
+        if path:
+            try:
+                created = self.profile_library.import_profile(path)
+                if not self._activate_profile(created.id, manual=True):
+                    self._refresh_profile_picker()
+            except Exception as exc:
+                QMessageBox.warning(self, "Import profile", str(exc))
+
+    def _check_auto_profile(self) -> None:
+        if (
+            not self.profile_library.auto_switch
+            or self.settings_dirty
+            or self.busy
+            or self.calibrating
+            or self.closing
+        ):
+            return
+        executable = foreground_executable()
+        if executable is None:
+            return
+        candidate = self.profile_library.match(executable) or self._manual_profile_id
+        if candidate != self._profile_candidate:
+            self._profile_candidate = candidate
+            self._profile_candidate_count = 1
+            return
+        self._profile_candidate_count += 1
+        if (
+            candidate != self._active_profile_id
+            and self._profile_candidate_count >= 2
+            and not mouse_buttons_down()
+        ):
+            self._activate_profile(candidate, manual=False)
 
     def _build_logs_page(self) -> QWidget:
         content, layout = _page_container()
@@ -1331,6 +1677,8 @@ class MainWindow(QMainWindow):
                 editor.output_target.currentIndexChanged,
                 editor.curve.currentIndexChanged,
                 editor.curve_strength.valueChanged,
+                editor.full_output_at.valueChanged,
+                editor.custom_curve_editor.pointsChanged,
                 editor.deadzone.valueChanged,
                 editor.pressure_floor.valueChanged,
                 editor.path_stabilization.valueChanged,
@@ -1463,10 +1811,17 @@ class MainWindow(QMainWindow):
             deadzone_high=deadzone,
             curve=str(editor.curve.currentData()),
             curve_strength=float(editor.curve_strength_value()),
+            custom_curve_points=editor.custom_curve_editor.points(),
+            full_output_at_pct=editor.full_output_at.value(),
             actuation_level=int(self.actuation[channel].value()),
             pressure_floor=int(editor.pressure_floor.value()),
             path_stabilization=int(editor.path_stabilization.value()),
             pressure_influence=int(editor.pressure_influence.value()),
+            onset_buffer=getattr(self.service.get_config(), channel).onset_buffer,
+            true_low_latency=getattr(self.service.get_config(), channel).true_low_latency,
+            stationary_pressure_updates=getattr(
+                self.service.get_config(), channel
+            ).stationary_pressure_updates,
         )
 
     def _settings_draft(self) -> SettingsDraft:
@@ -1544,6 +1899,12 @@ class MainWindow(QMainWindow):
                 else None
             ),
         )
+        try:
+            self.profile_library.update(
+                self._active_profile_id, self.service.get_config()
+            )
+        except Exception as exc:
+            self.write_system(f"Profile save failed: {exc}", level="ERROR")
         self.write_system("Settings saved.")
         return True
 
@@ -1638,6 +1999,8 @@ class MainWindow(QMainWindow):
             editor._update_output_target_controls()
             editor.curve.setCurrentIndex(editor.curve.findData(source.curve))
             editor.curve_strength.setValue(round(source.curve_strength * 10))
+            editor._set_custom_curve(source.custom_curve_points)
+            editor.full_output_at.setValue(source.full_output_at_pct)
             editor.deadzone.setValue(source.deadzone_low)
             editor.pressure_floor.setValue(source.pressure_floor)
             editor.path_stabilization.setValue(source.path_stabilization)
@@ -1675,6 +2038,8 @@ class MainWindow(QMainWindow):
                 editor._update_output_target_controls()
                 editor.curve.setCurrentIndex(max(0, editor.curve.findData(ch.curve)))
                 editor.curve_strength.setValue(round(ch.curve_strength * 10))
+                editor._set_custom_curve(ch.custom_curve_points)
+                editor.full_output_at.setValue(ch.full_output_at_pct)
                 self.actuation[channel].setValue(ch.actuation_level)
                 editor.deadzone.setValue(ch.deadzone_low)
                 editor.pressure_floor.setValue(ch.pressure_floor)
@@ -1976,6 +2341,35 @@ class MainWindow(QMainWindow):
         self.stroke_selector.blockSignals(False)
         self.compare_selector.blockSignals(False)
         self._load_selected_stroke()
+
+    def _export_selected_stroke(self, format_name: str) -> None:
+        source = self._trace_paths.get(self.stroke_selector.currentText())
+        if source is None:
+            QMessageBox.information(self, "Export stroke", "Select a stroke first.")
+            return
+        try:
+            trace = json.loads(source.read_text(encoding="utf-8"))
+            if format_name == "svg":
+                diameter, accepted = QInputDialog.getInt(
+                    self, "SVG brush size", "Maximum brush diameter (px):",
+                    16, 1, 300,
+                )
+                if not accepted:
+                    return
+                content = stroke_to_svg(trace, max_width=diameter)
+            else:
+                content = stroke_to_csv(trace)
+            filename, _selected = QFileDialog.getSaveFileName(
+                self,
+                f"Export {format_name.upper()}",
+                str(source.with_suffix("." + format_name)),
+                f"{format_name.upper()} (*.{format_name})",
+            )
+            if filename:
+                Path(filename).write_text(content, encoding="utf-8")
+                self.write_system(f"Stroke exported: {filename}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Export stroke", str(exc))
 
     def _load_selected_stroke(self, *_args: Any) -> None:
         path = self._trace_paths.get(self.stroke_selector.currentText())

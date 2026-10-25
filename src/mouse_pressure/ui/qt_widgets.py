@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mouse_pressure.bridge.curves import monotone_curve
 from mouse_pressure.ui.qt_theme import Theme
 
 
@@ -480,6 +481,136 @@ class MappingGraph(QWidget):
                 Qt.AlignmentFlag.AlignCenter,
                 "Start to test your pressure settings.",
             )
+
+
+class CustomCurveEditor(QWidget):
+    pointsChanged = Signal(object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._points = (0, 25, 50, 75, 100)
+        self._selected = 2
+        self._dragging = False
+        self.setMinimumHeight(190)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setToolTip("Drag a control point, or select it and use the arrow keys.")
+
+    def points(self) -> tuple[int, int, int, int, int]:
+        return self._points
+
+    def set_points(self, points: tuple[int, ...] | list[int]) -> None:
+        values = tuple(map(int, points))
+        if (
+            len(values) != 5
+            or values[0] != 0
+            or values[-1] != 100
+            or values != tuple(sorted(values))
+        ):
+            raise ValueError("Curve values must ascend from 0 to 100")
+        self._points = values
+        self.update()
+
+    def set_point(self, index: int, value: int) -> None:
+        if index not in (1, 2, 3):
+            return
+        values = list(self._points)
+        values[index] = max(values[index - 1], min(values[index + 1], int(value)))
+        updated = tuple(values)
+        if updated != self._points:
+            self._points = updated
+            self.pointsChanged.emit(updated)
+            self.update()
+
+    def _plot_rect(self) -> QRectF:
+        return QRectF(38, 12, max(1, self.width() - 60), max(1, self.height() - 46))
+
+    def _handle(self, index: int) -> QPointF:
+        box = self._plot_rect()
+        return QPointF(
+            box.left() + box.width() * index / 4,
+            box.bottom() - box.height() * self._points[index] / 100.0,
+        )
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        box = self._plot_rect()
+        faint = self.palette().mid().color()
+        faint.setAlpha(100)
+        painter.setPen(QPen(faint, 1))
+        for step in range(5):
+            x = box.left() + box.width() * step / 4
+            y = box.bottom() - box.height() * step / 4
+            painter.drawLine(QPointF(x, box.top()), QPointF(x, box.bottom()))
+            painter.drawLine(QPointF(box.left(), y), QPointF(box.right(), y))
+
+        path = QPainterPath()
+        for index in range(101):
+            t = index / 100
+            point = QPointF(
+                box.left() + box.width() * t,
+                box.bottom() - box.height() * monotone_curve(t, self._points),
+            )
+            if index == 0:
+                path.moveTo(point)
+            else:
+                path.lineTo(point)
+        color = QColor("#378ADD")
+        painter.setPen(QPen(color, 2.5))
+        painter.drawPath(path)
+        for index in range(5):
+            center = self._handle(index)
+            painter.setPen(QPen(color, 2))
+            painter.setBrush(self.palette().base().color())
+            radius = 7 if index == self._selected else 5
+            painter.drawEllipse(center, radius, radius)
+
+        painter.setPen(self.palette().text().color())
+        painter.drawText(
+            QRectF(box.left(), box.bottom() + 9, box.width(), 20),
+            Qt.AlignmentFlag.AlignCenter,
+            "Input pressure · 0–100%",
+        )
+        painter.end()
+
+    def mousePressEvent(self, event: Any) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton:
+            return super().mousePressEvent(event)
+        x = event.position().x()
+        self._selected = min((1, 2, 3), key=lambda i: abs(self._handle(i).x() - x))
+        if abs(x - self._handle(self._selected).x()) <= 24:
+            self._dragging = True
+            self.setFocus()
+            self._move_point(event.position().y())
+        self.update()
+
+    def _move_point(self, y: float) -> None:
+        box = self._plot_rect()
+        percentage = round((box.bottom() - y) / box.height() * 100)
+        self.set_point(self._selected, percentage)
+
+    def mouseMoveEvent(self, event: Any) -> None:  # noqa: N802
+        if self._dragging:
+            self._move_point(event.position().y())
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: Any) -> None:  # noqa: N802
+        self._dragging = False
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Left:
+            self._selected = max(1, self._selected - 1)
+        elif event.key() == Qt.Key.Key_Right:
+            self._selected = min(3, self._selected + 1)
+        elif event.key() == Qt.Key.Key_Up:
+            self.set_point(self._selected, self._points[self._selected] + 1)
+        elif event.key() == Qt.Key.Key_Down:
+            self.set_point(self._selected, self._points[self._selected] - 1)
+        else:
+            return super().keyPressEvent(event)
+        self.update()
 
 
 class StrokeGraph(QWidget):

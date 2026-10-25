@@ -11,7 +11,7 @@
   </p>
 
   <p>
-    <strong><a href="https://github.com/benmklein/Mouse-Pressure/releases">Download for Windows</a></strong>
+    <strong><a href="https://github.com/jocxfin/Mouse-Pressure/releases">Download for Windows</a></strong>
     · <a href="docs/compatibility.md">Compatibility</a>
   </p>
 </div>
@@ -43,6 +43,18 @@ driver.
   <img src="docs/media/interface.png" width="960" alt="Mouse Pressure configuration interface">
 </p>
 
+## Pressure Studio 5.0
+
+Mouse Pressure 5.0 introduces three workflows:
+
+- **Curve Studio** — drag three control points on a five-point pressure curve, or start with an inking, shading, or fine-control shape. The result is smoothly interpolated without reducing pressure as force increases. Set **Reach full pressure at** to control when the output reaches 100%, including with the exponential curve.
+- **Application profiles** — save named left/right button mappings, import or export them as JSON, and assign profiles to executables such as Photoshop.exe or Krita.exe. Automatic switching only occurs between strokes. DPI, report rate, button actuation, and global shortcuts remain device-wide.
+- **Stroke export** — record strokes in Debug mode, then export their pen reports as CSV or a pressure-width SVG from Stroke Analysis.
+
+Existing configuration files are upgraded to schema 2 when loaded. The installer retains the original application identity.
+
+[Pressure Studio guide](docs/pressure-studio.md)
+
 ## Using both buttons
 
 Both buttons can be mapped to different outputs, allowing you to control different continuous values at the same time.
@@ -72,7 +84,7 @@ games. A Godot plugin is planned to make those signals easier to use.
 ## Install
 
 1. Download `MousePressure-<version>-Setup.exe` from
-   [Releases](https://github.com/benmklein/Mouse-Pressure/releases).
+   [Releases](https://github.com/jocxfin/Mouse-Pressure/releases).
 2. Run the installer.
 3. Connect a compatible mouse.
 4. Open Mouse Pressure and select **Start**.

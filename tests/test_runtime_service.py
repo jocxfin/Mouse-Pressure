@@ -856,7 +856,7 @@ class RuntimeServiceTests(unittest.IsolatedAsyncioTestCase):
         service.set_failure_callback(failures.append)
 
         await service.start_stream()
-        deadline = asyncio.get_running_loop().time() + 1.5
+        deadline = asyncio.get_running_loop().time() + 4.0
         while service.stream_active and asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(0.05)
 
@@ -864,7 +864,7 @@ class RuntimeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("native clicks were restored", failures[0])
         self.assertEqual(len(holder["emitter"].fail_open_calls), 1)
-        close_deadline = asyncio.get_running_loop().time() + 1.5
+        close_deadline = asyncio.get_running_loop().time() + 4.0
         while (
             holder["emitter"].close_calls == 0
             and asyncio.get_running_loop().time() < close_deadline

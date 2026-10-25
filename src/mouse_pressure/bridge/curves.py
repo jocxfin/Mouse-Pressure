@@ -9,7 +9,7 @@ _CURVE_ALIASES = {
     "soft": "ease_in",
     "hard": "ease_out",
     "scurve": "s_curve",
-    # Legacy aliases (deprecated at CLI boundary, still accepted)
+    "custom": "custom",
     "ease_in": "ease_in",
     "ease_out": "ease_out",
     "s_curve": "s_curve",
@@ -22,19 +22,19 @@ def _clamp01(value: float) -> float:
 
 @dataclass
 class PressureConfig:
-    """Configuration for pressure mapping."""
-    raw_min: int = 320        # 10-bit ADC code at rest
-    raw_max: int = 680        # 10-bit ADC code at full press
-    out_min: int = 0          # Minimum output pressure
-    out_max: int = 1023       # Maximum output pressure (Wintab standard)
-    deadzone_low: float = 0.05   # Ignore bottom 5% of range (noise floor)
-    deadzone_high: float = 0.95  # Cap top 5% (avoid needing max force)
-    curve: str = "s_curve"       # linear, ease_in, ease_out, s_curve
-    curve_strength: float = 2.0  # How aggressive the curve is (1.0 = mild)
+    raw_min: int = 320
+    raw_max: int = 680
+    out_min: int = 0
+    out_max: int = 1023
+    deadzone_low: float = 0.05
+    deadzone_high: float = 0.95
+    curve: str = "s_curve"
+    curve_strength: float = 2.0
+    custom_curve_points: tuple[int, int, int, int, int] = (0, 25, 50, 75, 100)
+    full_output_at_pct: int = 95
 
 
 def pressure_config_for_channel(channel: ChannelConfig) -> PressureConfig:
-    """Compile one channel's persisted settings into mapping semantics."""
     return PressureConfig(
         raw_min=channel.raw_min,
         raw_max=channel.raw_max,
@@ -44,6 +44,8 @@ def pressure_config_for_channel(channel: ChannelConfig) -> PressureConfig:
         deadzone_high=1.0 - channel.deadzone_high / 100.0,
         curve=normalize_curve_name(channel.curve),
         curve_strength=channel.curve_strength,
+        custom_curve_points=channel.custom_curve_points,
+        full_output_at_pct=channel.full_output_at_pct,
     )
 
 
@@ -54,93 +56,85 @@ def normalize_curve_name(name: str) -> str:
     return normalized
 
 
+def monotone_curve(t: float, percentages: tuple[int, ...]) -> float:
+    """Interpolate five fixed-X knots without overshoot or pressure reversals."""
+    t = _clamp01(t)
+    values = [float(value) / 100.0 for value in percentages]
+    if t <= 0.0:
+        return values[0]
+    if t >= 1.0:
+        return values[-1]
+
+    delta = [4.0 * (b - a) for a, b in zip(values, values[1:])]
+    tangent = [0.0] * 5
+    tangent[0] = max(0.0, min(3.0 * delta[0], 1.5 * delta[0] - 0.5 * delta[1]))
+    tangent[-1] = max(0.0, min(3.0 * delta[-1], 1.5 * delta[-1] - 0.5 * delta[-2]))
+    for index in (1, 2, 3):
+        a, b = delta[index - 1], delta[index]
+        tangent[index] = 2.0 * a * b / (a + b) if a > 0.0 and b > 0.0 else 0.0
+
+    segment = min(3, int(t * 4.0))
+    u = t * 4.0 - segment
+    u2, u3 = u * u, u * u * u
+    result = (
+        (2 * u3 - 3 * u2 + 1) * values[segment]
+        + (u3 - 2 * u2 + u) * tangent[segment] / 4.0
+        + (-2 * u3 + 3 * u2) * values[segment + 1]
+        + (u3 - u2) * tangent[segment + 1] / 4.0
+    )
+    return max(values[segment], min(values[segment + 1], result))
+
+
 def apply_curve(normalized: float, config: PressureConfig) -> float:
-    """Apply pressure curve to a 0-1 normalized value.
-    
-    Args:
-        normalized: Input pressure, 0.0 to 1.0
-        config: Pressure curve configuration
-        
-    Returns:
-        Curved pressure value, 0.0 to 1.0
-    """
     t = _clamp01(normalized)
+    if t == 0.0 or t == 1.0:
+        return t
     gamma = config.curve_strength
     curve = normalize_curve_name(config.curve)
 
     if curve == "linear":
-        return float(t)
-
-    elif curve == "ease_in":
-        # Power curve — slow start, fast finish
-        return float(t ** gamma)
-
-    elif curve == "ease_out":
-        # Inverse power — fast start, slow finish
-        return float(1.0 - (1.0 - t) ** gamma)
-
-    elif curve == "s_curve":
-        # Hermite-style S-curve — soft start and end
+        return t
+    if curve == "ease_in":
+        return t**gamma
+    if curve == "ease_out":
+        return 1.0 - (1.0 - t) ** gamma
+    if curve == "s_curve":
         if t < 0.5:
-            return float(0.5 * (2.0 * t) ** gamma)
-        else:
-            return float(1.0 - 0.5 * (2.0 * (1.0 - t)) ** gamma)
-    
-    return float(t)
-
-
-def map_pressure(raw_value: int, config: PressureConfig) -> int:
-    """Map a raw analog value to output pressure.
-    
-    Args:
-        raw_value: Raw value from the compatible HID report
-        config: Pressure mapping configuration
-        
-    Returns:
-        Mapped pressure value in the output range
-    """
-    # Normalize to 0-1 within the raw range
-    raw_range = config.raw_max - config.raw_min
-    if raw_range <= 0:
-        return config.out_min
-    
-    normalized = (raw_value - config.raw_min) / raw_range
-    normalized = _clamp01(normalized)
-    
-    # Apply deadzones
-    if normalized < config.deadzone_low:
-        return config.out_min
-    if normalized > config.deadzone_high:
-        return config.out_max
-    
-    # Rescale within deadzones
-    active_range = config.deadzone_high - config.deadzone_low
-    normalized = (normalized - config.deadzone_low) / active_range
-    normalized = _clamp01(normalized)
-    
-    # Apply curve
-    curved = apply_curve(normalized, config)
-    
-    # Map to output range
-    out_range = config.out_max - config.out_min
-    return int(config.out_min + curved * out_range)
+            return 0.5 * (2.0 * t) ** gamma
+        return 1.0 - 0.5 * (2.0 * (1.0 - t)) ** gamma
+    if curve == "custom":
+        return monotone_curve(t, config.custom_curve_points)
+    return t
 
 
 def map_normalized_pressure(normalized: float, config: PressureConfig) -> int:
-    """Map normalized pressure (0..1) to output range using configured curve."""
     t = _clamp01(normalized)
-
-    if t < config.deadzone_low:
+    if t <= config.deadzone_low:
         return config.out_min
-    if t > config.deadzone_high:
+    if t >= config.deadzone_high:
         return config.out_max
 
     active_range = config.deadzone_high - config.deadzone_low
     if active_range <= 0.0:
         return config.out_min
 
-    t = (t - config.deadzone_low) / active_range
-    t = _clamp01(t)
-    curved = apply_curve(t, config)
-    out_range = config.out_max - config.out_min
-    return int(config.out_min + curved * out_range)
+    t = _clamp01((t - config.deadzone_low) / active_range)
+    full_scale = config.full_output_at_pct / 100.0
+    t = _clamp01(t / full_scale)
+    if t >= 1.0:
+        return config.out_max
+
+    result = config.out_min + apply_curve(t, config) * (
+        config.out_max - config.out_min
+    )
+    return max(config.out_min, min(config.out_max, round(result)))
+
+
+def map_pressure(raw_value: int, config: PressureConfig) -> int:
+    raw_range = config.raw_max - config.raw_min
+    if raw_range <= 0:
+        return config.out_min
+    return map_normalized_pressure(
+        (raw_value - config.raw_min) / raw_range,
+        config,
+    )
